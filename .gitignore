@@ -1,0 +1,30 @@
+# Python
+VIDEOvenv/
+__pycache__/
+*.py[cod]
+*.class
+.ipynb_checkpoints/
+
+# TCC - Dados e Vídeos (Pesados)
+src/data/
+src/outputs/
+src/datasets/
+src/runs/
+src/football_ai.ipynb
+src/TCC_VarzeaVision_Keypoint_Backup/
+*.mp4
+*.avi
+*.mov
+*.webm
+*.zip
+
+# Machine Learning / Modelos
+*.pt
+*.onnx
+*.pkl
+
+# macOS
+.DS_Store
+
+# Documentação local
+.vscode/
