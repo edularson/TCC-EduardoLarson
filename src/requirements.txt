@@ -1,0 +1,32 @@
+# TCC Requirements
+# Python 3.14 
+
+# Computer Vision
+opencv-python==4.13.0.92
+numpy==2.4.4
+
+# Deep Learning
+torch==2.11.0
+torchvision==0.26.0
+
+# YOLOv8 and Supervision
+ultralytics==8.4.46
+supervision==0.28.0
+
+# Sports analytics
+sports==0.1.0
+
+# Machine Learning
+xgboost==3.2.0
+scikit-learn==1.8.0
+joblib==1.5.3
+
+# Data handling
+pandas==3.0.2
+pyyaml>=6.0
+
+# Utilities
+tqdm==4.67.3
+
+# Note: Install with: pip install -r requirements.txt
+# For MPS support on M4 Pro, torch should auto-detect MPS

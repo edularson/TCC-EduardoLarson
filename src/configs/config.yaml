@@ -1,0 +1,64 @@
+# VarzeaVision Configuration
+# All hardcoded values from tutorial centralized here
+
+# Model paths (local .pt weights)
+models:
+  detection:
+    # Local YOLOv8x weights trained on football-players-detection-3zvbc v10
+    path: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/runs/detect/train/weights/best.pt"
+    # Class mapping (confirmed via Roboflow data.yaml)
+    class_names: ["ball", "goalkeeper", "player", "referee"]
+    class_ids:
+      ball: 0
+      goalkeeper: 1
+      player: 2
+      referee: 3
+    confidence_threshold: 0.3
+    nms_threshold: 0.5
+    imgsz: 1280
+  field_detection:
+    # Roboflow football-field-detection-f07vi v14
+    path: "roboflow/football-field-detection-f07vi/14"
+    confidence_threshold: 0.3
+    keypoint_confidence_threshold: 0.5
+  reid:
+    # Lightweight backbone for BotSORT ReID, MPS-compatible
+    path: "mobilev3_small"  # MobileNetV3-Small for MPS compatibility
+
+# Tracking
+tracking:
+  type: "botsort"  # BotSORT with ReID
+  tracker_config: "botsort.yaml"  # Supervision built-in config
+  max_age: 30  # Max frames to keep dead track
+  min_hits: 3  # Min hits to confirm track
+
+# Shot detection heuristic thresholds (real-world meters, via homography)
+shot_detection:
+  max_player_ball_distance: 15  # meters
+  min_ball_acceleration: 0.5  # m/s²
+  goal_proximity_distance: 60.0  # meters from goal center to validate shot direction
+
+# xG model features
+xg:
+  model_type: "xgboost"  # Traditional ML: xgboost or logistic_regression
+  features:
+    - "shot_distance"  # meters to goal center
+    - "shot_angle"    # degrees from goal line
+    - "body_part"      # 0=left_foot, 1=right_foot, 2=head
+    - "defensive_pressure"  # number of opponents within 5m
+  statsbomb_competition: "UEFA Champions League"
+  statsbomb_season: ["2024-2025", "2025-2026"]
+
+# Homography (static per clip for tactical cam)
+homography:
+  recompute_threshold: 0.3  # If <30% keypoints detected, recompute
+
+# Paths (local, no Colab)
+paths:
+  datasets: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/datasets"
+  runs: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/runs"
+  outputs: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/outputs"
+  data: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/data"
+
+# Device (M4 Pro MPS)
+device: "mps"  # PyTorch MPS for MacBook M4 Pro, fallback: "cpu"
