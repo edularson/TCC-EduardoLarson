@@ -24,13 +24,16 @@ class ShotDetector:
         self.ball_trail = []  # Last 5 positions for acceleration smoothing
         self.trail_length = 5
         
+        self.last_shot_time = -999  # timestamp do último chute detectado
+        self.shot_cooldown = 3.0    # segundos mínimos entre chutes
+        
         print(f"ShotDetector initialized. Thresholds: max_dist={self.max_player_ball_dist}m, min_accel={self.min_ball_accel}m/s²")
 
     def reset_clip(self):
-        """Reset state for new clip."""
         self.prev_ball_pos = None
         self.prev_frame_time = None
         self.ball_trail = []
+        self.last_shot_time = -999
         print("ShotDetector reset for new clip.")
 
     def compute_ball_acceleration(self, current_pos: np.ndarray, frame_time: float) -> tuple:
@@ -127,35 +130,41 @@ class ShotDetector:
 
 
     def detect_shot(self, ball_pos: np.ndarray, frame_time: float,
-                    accel_mag: float, closest_player: dict) -> tuple:
+                accel_mag: float, closest_player: dict) -> tuple:
         """
-        Wrapper chamado pelo pipeline principal.
+        Wrapper chamado pelo pipeline. Agora usa is_shot() completo.
+        closest_player deve conter 'foot_pos_real' — posição do pé em metros.
         """
-        # Goal centers (FIFA pitch: 105x68m)
-        # Time 0 ataca para direita (gol em x=105), time 1 para esquerda (x=0)
+        
+        if 7.0 <= frame_time <= 12.0 or 32.0 <= frame_time <= 37.0 or 92.0 <= frame_time <= 96.0:
+            team_id = closest_player.get('team', -1)
+            goal_pos = np.array([0.0, 35.0]) if team_id == 1 else np.array([120.0, 35.0])
+            player_pos = closest_player.get('foot_pos_real')
+            goal_dist = np.linalg.norm(goal_pos - ball_pos)
+            player_dist = np.linalg.norm(player_pos - ball_pos) if player_pos is not None else -1
+            print(f"[DEBUG] t={frame_time:.2f}s | ball_pos=({ball_pos[0]:.1f}, {ball_pos[1]:.1f}) | team={team_id} | goal_pos={goal_pos} | goal_dist={goal_dist:.2f}m | player_dist={player_dist:.2f}m")
+        
+        if frame_time - self.last_shot_time < self.shot_cooldown:
+            return False, {'confidence': 0.0, 'reason': 'cooldown'}
 
         team_id = closest_player.get('team', -1)
-        if team_id == 1:
-            goal_pos = np.array([0.0, 34.0])
-        else:
-            goal_pos = np.array([105.0, 34.0])
+        goal_pos = np.array([0.0, 35.0]) if team_id == 1 else np.array([120.0, 35.0])
 
-        # Verifica apenas aceleração e proximidade do gol
-        # (direção não é verificada pois player_pos está em pixels, não metros)
-        if accel_mag < self.min_ball_accel:
-            return False, {'confidence': 0.0, 'reason': f'accel={accel_mag:.2f} < {self.min_ball_accel}'}
+        # Posição do jogador em metros reais
+        player_pos = closest_player.get('foot_pos_real')
+        if player_pos is None:
+            return False, {'confidence': 0.0, 'reason': 'no_player_pos'}
 
-        ball_to_goal_dist = np.linalg.norm(goal_pos - ball_pos)
-        if ball_to_goal_dist > self.goal_proximity:
-            return False, {'confidence': 0.0, 'reason': f'dist_goal={ball_to_goal_dist:.2f} > {self.goal_proximity}'}
+        is_shot_result, confidence, reason = self.is_shot(
+            player_pos, ball_pos, accel_mag, goal_pos, team_id
+        )
 
-        confidence = min(accel_mag / (self.min_ball_accel * 2), 1.0)
-        shot_data = {
-            'confidence': confidence,
-            'reason': f'SHOT: accel={accel_mag:.2f}, dist_goal={ball_to_goal_dist:.2f}',
-            'goal_pos': goal_pos.tolist()
-        }
-        return True, shot_data
+        if not is_shot_result:
+            return False, {'confidence': confidence, 'reason': reason}
+
+        self.last_shot_time = frame_time
+        return True, {'confidence': confidence, 'reason': reason, 'goal_pos': goal_pos.tolist()}
+
 
 if __name__ == "__main__":
     detector = ShotDetector()

@@ -44,7 +44,7 @@ def create_radar_view(pitch_players_xy: np.ndarray, players_team_ids: np.ndarray
                      pitch_ball_xy: np.ndarray = None, config: SoccerPitchConfiguration = None) -> np.ndarray:
     if config is None:
         config = SoccerPitchConfiguration()
-    radar = draw_pitch(config, background_color=sv.Color.WHITE)
+    radar = draw_pitch(config, background_color=sv.Color.from_hex('4a7c3f'))
     team_0_mask = players_team_ids == 0
     team_1_mask = players_team_ids == 1
     if np.any(team_0_mask):

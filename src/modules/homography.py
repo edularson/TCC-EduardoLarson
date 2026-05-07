@@ -54,15 +54,9 @@ class PitchMapper:
         print("PitchMapper reset for new clip.")
 
     def frame_to_pitch(self, transformer: ViewTransformer, points: np.ndarray) -> np.ndarray:
-        """
-        Convert frame pixel coordinates to real-world pitch meters.
-        Args:
-            transformer: ViewTransformer instance
-            points: (N, 2) array of (x,y) pixel coordinates
-        Returns:
-            (N, 2) array of (x,y) real-world meters
-        """
-        return transformer.transform_points(points)
+        result = transformer.transform_points(points)
+        result[:, 0] = 120.0 - result[:, 0]  # Inverte eixo X
+        return result
 
     def pitch_to_frame(self, transformer: ViewTransformer, points: np.ndarray) -> np.ndarray:
         """Convert real-world pitch meters to frame pixel coordinates."""
@@ -70,29 +64,13 @@ class PitchMapper:
 
     def get_goal_coordinates(self, team_id: int) -> np.ndarray:
         """
-        Get real-world coordinates of both goals.
-        Returns:
-            team_0_goal: (2,) center of goal for team 0
-            team_1_goal: (2,) center of goal for team 1
+        Retorna o centro do gol adversário em metros reais.
+        Team 1 ataca para esquerda (x=0), Team 0 ataca para direita (x=120).
         """
-        # SoccerPitchConfiguration: goal vertices
-        left_goal_vertices = np.array([
-            self.config_pitch.vertices[24],  # Goal left top
-            self.config_pitch.vertices[25]   # Goal left bottom
-        ])
-        right_goal_vertices = np.array([
-            self.config_pitch.vertices[26],  # Goal right top
-            self.config_pitch.vertices[27]   # Goal right bottom
-        ])
-        
-        left_goal_center = np.mean(left_goal_vertices, axis=0)
-        right_goal_center = np.mean(right_goal_vertices, axis=0)
-        
-        # Team 0 defends left goal, Team 1 defends right goal
-        if team_id == 0:
-            return left_goal_center
+        if team_id == 1:
+            return np.array([0.0, 35.0])
         else:
-            return right_goal_center
+            return np.array([120.0, 35.0])
 
 
 if __name__ == "__main__":

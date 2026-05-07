@@ -181,10 +181,6 @@ class VarzeaVisionPipeline:
                 ball_pos_real = self.pitch_mapper.frame_to_pitch(
                     self.transformer, np.array([ball_center])
                 )[0]
-                
-                # DEBUG - remova depois de confirmar
-                if self.frame_count <= 10:
-                    print(f"Frame {self.frame_count} | ball_center={ball_center} | ball_pitch={ball_pos_real}")
 
                 self.ball_positions[frame_time] = ball_pos_real
 
@@ -206,15 +202,25 @@ class VarzeaVisionPipeline:
                             continue
 
                         px1, py1, px2, py2 = map(int, xyxy)
-                        player_center = ((px1 + px2) // 2, (py1 + py2) // 2)
-                        dist = np.sqrt((ball_x - player_center[0])**2 + (ball_y - player_center[1])**2)
 
-                        if dist < closest_dist and dist < 150:
-                            closest_dist = dist
+                        # Usa posição do pé (bottom-center) em vez do centro da bbox
+                        foot_pixel = self.detector.get_player_foot_position((px1, py1, px2, py2, 0))
+
+                        # Converte pé para metros reais via homografia
+                        foot_pos_real = self.pitch_mapper.frame_to_pitch(
+                            self.transformer, np.array([foot_pixel])
+                        )[0]
+
+                        # Distância em metros reais (não pixels)
+                        dist_real = np.linalg.norm(ball_pos_real - foot_pos_real)
+
+                        if dist_real < closest_dist and dist_real < 3.0:  # 3 metros
+                            closest_dist = dist_real
                             closest_player = {
                                 'track_id': int(track_id),
                                 'bbox': (px1, py1, px2, py2),
-                                'team': self.tracker_id_to_team.get(int(track_id), -1)
+                                'team': self.tracker_id_to_team.get(int(track_id), -1),
+                                'foot_pos_real': foot_pos_real  # novo campo
                             }
 
                     if closest_player is not None:
@@ -225,17 +231,11 @@ class VarzeaVisionPipeline:
                         if is_shot:
                             team_id = closest_player['team']
 
-                            # Compute xG usando extract_features corretamente
                             xg_value = None
                             if self.xg_model.model is not None:
                                 shot_pos = np.array(ball_pos_real)
-                                feat = self.xg_model.extract_features(
-                                    shot_pos, body_part=1, def_pressure=0
-                                )
-                                # Features extras com valores default
-                                extra = np.array([0, 0, 0, 0, 0, 0])
-                                feat_full = np.append(feat, extra).reshape(1, -1)
-                                xg_value = float(self.xg_model.predict_xg(feat_full)[0])
+                                feat = self.xg_model.extract_features(shot_pos, body_part=1)
+                                xg_value = float(self.xg_model.predict_xg(feat.reshape(1, -1))[0])
 
                             shot_event = {
                                 'time': frame_time,
@@ -255,6 +255,36 @@ class VarzeaVisionPipeline:
 
                             shot_tuple = (closest_player['track_id'], 0.0, "detected")
                             frame = draw_shot_event(frame, shot_tuple, xg_value)
+
+                            # Radar overlay no canto inferior direito
+                            if len(sv_detections) > 0 and sv_detections.tracker_id is not None:
+                                # Coleta posições dos jogadores no pitch
+                                pitch_xy = []
+                                team_ids = []
+                                for xyxy, cls_id, track_id in zip(
+                                    sv_detections.xyxy, sv_detections.class_id, sv_detections.tracker_id
+                                ):
+                                    if track_id is None or self.transformer is None:
+                                        continue
+                                    cx = int((xyxy[0] + xyxy[2]) / 2)
+                                    cy = int((xyxy[1] + xyxy[3]) / 2)
+                                    pos_pitch = self.pitch_mapper.frame_to_pitch(
+                                        self.transformer, np.array([[cx, cy]])
+                                    )[0]
+                                    pitch_xy.append(pos_pitch)
+                                    team_ids.append(self.tracker_id_to_team.get(int(track_id), 0))
+
+                                if len(pitch_xy) >= 2:
+                                    pitch_xy = np.array(pitch_xy)
+                                    team_ids = np.array(team_ids)
+                                    radar = create_radar_view(pitch_xy, team_ids, ball_pos_real)
+
+                                    # Reduz radar para 30% e coloca no canto inferior direito
+                                    rh, rw = radar.shape[:2]
+                                    new_w, new_h = int(rw * 0.3), int(rh * 0.3)
+                                    radar_small = cv2.resize(radar, (new_w, new_h))
+                                    h, w = frame.shape[:2]
+                                    frame[h-new_h:h, w-new_w:w] = radar_small
 
                 # Mostra posição da bola no frame
                 h, w = frame.shape[:2]
@@ -294,6 +324,11 @@ class VarzeaVisionPipeline:
 
         print(f"\nProcessing complete! Output: {output_path}")
         print(f"Detected {len(self.shot_events)} shot events")
+        
+        # Salva shot map
+        if self.shot_events:
+            shot_map_path = output_path.replace('.mp4', '_shot_map.png')
+            self._save_shot_map(shot_map_path)
 
         return self.shot_events
 
@@ -334,6 +369,24 @@ class VarzeaVisionPipeline:
         cap.release()
         print(f"Collected {len(crops)} crops")
         self.team_classifier.train(crops)
+        
+    def _save_shot_map(self, output_path: str):
+        """Gera e salva imagem com todos os chutes marcados no campo."""
+        from sports.configs.soccer import SoccerPitchConfiguration
+        config = SoccerPitchConfiguration()
+        
+        # Campo vazio como base
+        import supervision as sv
+        from sports.annotators.soccer import draw_pitch
+        shot_map = draw_pitch(config, background_color=sv.Color.from_hex('4a7c3f'))
+        
+        for event in self.shot_events:
+            pos = np.array(event['position'])
+            xg = event['xg'] or 0.0
+            shot_map = draw_pitch_with_xg(shot_map, pos, xg, config)
+        
+        cv2.imwrite(output_path, shot_map)
+        print(f"Shot map saved to {output_path}")
 
 '''
 if __name__ == "__main__":
@@ -350,5 +403,7 @@ if __name__ == "__main__":
     # Só treina se não existir classifier salvo
     if not Path("outputs/team_classifier.joblib").exists():
         pipeline.auto_train_team_classifier("data/LIVERPOOLxREAL2022teste.mp4")
-    events = pipeline.process_clip("data/LIVERPOOLxREAL2022teste.mp4")
+        
+    # events = pipeline.process_clip("data/LIVERPOOLxREAL2022teste.mp4")
+    events = pipeline.process_clip("data/test_15s.mp4")
     print(f"Shot events: {events}")

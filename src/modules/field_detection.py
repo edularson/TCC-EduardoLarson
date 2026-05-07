@@ -85,7 +85,7 @@ class FieldDetector:
         if np.sum(valid_mask) < 4:
             return np.array([]), np.array([]), valid_mask
 
-        vertices = np.array(self.config_pitch.vertices)
+        vertices = np.array(self.config_pitch.vertices) / 100.0
         valid_indices = np.where(valid_mask)[0]
         valid_indices = valid_indices[valid_indices < len(vertices)]
 
