@@ -5,7 +5,7 @@
 models:
   detection:
     # Local YOLOv8x weights trained on football-players-detection-3zvbc v10
-    path: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/runs/detect/train/weights/best.pt"
+    path: "runs/detect/train/weights/best.pt"
     # Class mapping (confirmed via Roboflow data.yaml)
     class_names: ["ball", "goalkeeper", "player", "referee"]
     class_ids:
@@ -21,9 +21,10 @@ models:
     path: "roboflow/football-field-detection-f07vi/14"
     confidence_threshold: 0.3
     keypoint_confidence_threshold: 0.5
+    max_reproj_error_px: 10.0
   reid:
-    # Lightweight backbone for BotSORT ReID, MPS-compatible
-    path: "mobilev3_small"  # MobileNetV3-Small for MPS compatibility
+    path: ""  # supervision BotSORT carrega ReID internamente via botsort.yaml
+    
 
 # Tracking
 tracking:
@@ -34,31 +35,87 @@ tracking:
 
 # Shot detection heuristic thresholds (real-world meters, via homography)
 shot_detection:
-  max_player_ball_distance: 15  # meters
-  min_ball_acceleration: 0.5  # m/s²
-  goal_proximity_distance: 60.0  # meters from goal center to validate shot direction
+  # Distância máxima jogador-bola em metros para considerar que o jogador
+  # tocou na bola. 3.0m é conservador — ajuste para baixo (1.5-2.0) se
+  # tiver muitos falsos positivos de passes longe do gol.
+  max_player_ball_distance: 3.0    # metros (era 15, muito alto!)
+ 
+  # MUDANÇA: agora usa VELOCIDADE mínima da bola, não aceleração.
+  # Velocidade típica de um chute: 15-30 m/s
+  # Velocidade de um passe rápido: 8-15 m/s
+  # Threshold de 5 m/s filtra movimentos lentos mas permite passes fortes
+  # (aceite alguns falsos positivos de passes em troca de não perder chutes)
+  min_ball_speed: 5.0              # m/s (era min_ball_acceleration: 0.5)
+ 
+  # Distância máxima da bola ao gol para considerar que pode ser chute.
+  # 35m do centro do gol cobre a área de pênalti e um pouco além.
+  # Se quiser capturar chutes de fora da área, aumente para 45-50m.
+  goal_proximity_distance: 35.0   # metros (era 60, muito permissivo!)
+ 
+  # Janela de frames para estimativa de velocidade por regressão linear.
+  # Maior janela = mais suave mas mais lento para responder a mudanças.
+  velocity_window_frames: 5
+ 
+  # Cooldown mínimo entre dois chutes consecutivos (segundos).
+  # Evita que um único chute gere múltiplos eventos.
+  shot_cooldown: 3.0
 
 # xG model features
 xg:
-  model_type: "xgboost"  # Traditional ML: xgboost or logistic_regression
+  model_type: "xgboost"  # ou "gradient_boosting" se não tiver xgboost instalado
+ 
+  # IDs CORRETOS (confirmados no terminal):
+  #   competition_id=16  →  Champions League
+  #   competition_id=9   →  Bundesliga
+  statsbomb_competitions:
+  - {competition_id: 16, season_id: 4}    # UCL 2018/2019 (jogo completo)
+  - {competition_id: 9,  season_id: 281}  # Bundesliga 2023/2024 — 34 jogos
+  - {competition_id: 9,  season_id: 27}   # Bundesliga 2015/2016 — 306 jogos
+ 
   features:
-    - "shot_distance"  # meters to goal center
-    - "shot_angle"    # degrees from goal line
-    - "body_part"      # 0=left_foot, 1=right_foot, 2=head
-    - "defensive_pressure"  # number of opponents within 5m
-  statsbomb_competition: "UEFA Champions League"
-  statsbomb_season: ["2024-2025", "2025-2026"]
+    - "shot_distance"
+    - "shot_angle"
+    - "body_part_foot"
+    - "body_part_head"
+    - "def_pressure"
 
 # Homography (static per clip for tactical cam)
 homography:
-  recompute_threshold: 0.3  # If <30% keypoints detected, recompute
+  # Qualidade mínima para aceitar H do frame atual diretamente.
+  # Abaixo disso, usa média ponderada histórica ou predição do Kalman.
+  # Range: [0.0, 1.0]. Valor recomendado: 0.3
+  min_quality_threshold: 0.3
+ 
+  # Frames acumulados na fase de warmup antes de inicializar o Kalman.
+  # Use ~10 para câmera tática estática.
+  warmup_frames: 10
+ 
+  # Tamanho do histórico para média ponderada (deque).
+  history_size: 10
+ 
+  # Parâmetros do Kalman Filter sobre os elementos de H.
+  # process_noise: quão rápido H pode mudar entre frames.
+  #   Câmera ESTÁTICA → valor pequeno (1e-5 a 1e-4)
+  #   Câmera com movimento → valor maior (1e-3 a 1e-2)
+  # measurement_noise: quão ruidosa é cada medição de H.
+  #   Se keypoints forem muito ruidosos, aumente (1e-1)
+  kalman_process_noise: 0.0001      # 1e-4
+  kalman_measurement_noise: 0.01    # 1e-2
+ 
+  # IMPORTANTE: controla a inversão do eixo X do campo.
+  # Se os jogadores aparecem no lado errado do radar, mude para true.
+  # Afeta TODOS os cálculos (posição de jogadores, bola E coordenadas dos gols).
+  invert_x_axis: false
+ 
+  # Mantido por compatibilidade (não usado mais ativamente)
+  recompute_threshold: 0.3
 
 # Paths (local, no Colab)
 paths:
-  datasets: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/datasets"
-  runs: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/runs"
-  outputs: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/outputs"
-  data: "/Users/eduardolarson/Documents/Faculdade/TCC/codigos/TCC-EduardoLarson/src/data"
+  datasets: "../datasets"
+  runs: "runs"
+  outputs: "../outputs"
+  data: "../data"
 
 # Device (M4 Pro MPS)
 device: "mps"  # PyTorch MPS for MacBook M4 Pro, fallback: "cpu"
