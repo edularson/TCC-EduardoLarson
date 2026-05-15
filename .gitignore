@@ -1,17 +1,24 @@
 # Python
-VIDEOvenv/
 __pycache__/
 *.py[cod]
+*.pyc
 *.class
 .ipynb_checkpoints/
 
-# TCC - Dados e Vídeos (Pesados)
+# Ambientes virtuais
+venv/
+venv_new/
+VIDEOvenv/
+.venv/
+bin/
+lib/
+share/
+
+# Dados e mídia (pesados)
 src/data/
 src/outputs/
 src/datasets/
 src/runs/
-src/football_ai.ipynb
-src/TCC_VarzeaVision_Keypoint_Backup/
 *.mp4
 *.avi
 *.mov
@@ -22,9 +29,24 @@ src/TCC_VarzeaVision_Keypoint_Backup/
 *.pt
 *.onnx
 *.pkl
+*.joblib
+*.pth
+
+# Debug e outputs
+debug_homography_out/
+src/figures/
+outputs/
+
+# Modelos
+external/
+
+# Documentação
+.vscode/
+.aider*
+*.csv
+
+# Variáveis de ambiente
+.env
 
 # macOS
 .DS_Store
-
-# Documentação local
-.vscode/

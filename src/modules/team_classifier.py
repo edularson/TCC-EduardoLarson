@@ -1,32 +1,35 @@
-import yaml
 import numpy as np
-from sports.common.team import TeamClassifier
-from tqdm import tqdm
-from pathlib import Path
+import torch
 import joblib
+from pathlib import Path
+from tqdm import tqdm
+from sports.common.team import TeamClassifier
+
+# Usando nossa Camada de Configuração em Memória
+from modules.common import load_config
 
 class TeamClassifierWrapper:
     def __init__(self, config_path=None):
-        if config_path is None:
-            module_dir = Path(__file__).parent
-            project_root = module_dir.parent
-            config_path = project_root / "configs" / "config.yaml"
-        
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        self.config = load_config(config_path)
         
         self.device = self.config['device']
-        if self.device == 'mps' and not __import__('torch').backends.mps.is_available():
+        if self.device == 'mps' and not torch.backends.mps.is_available():
             self.device = 'cpu'
+            print("MPS not available, falling back to CPU")
         
         self.classifier = None
-        self.model_path = str(Path(__file__).parent.parent / "outputs" / "team_classifier.joblib")
+        
+        # Centralizando o uso de paths a partir do config.yaml
+        from modules.common import get_project_root
+        self.model_path = get_project_root() / "outputs" / "team_classifier.joblib"
+
+        
         self._load_if_exists()
         print(f"TeamClassifier initialized on device: {self.device}")
 
     def _load_if_exists(self):
         """Load pre-trained classifier if it exists."""
-        if Path(self.model_path).exists():
+        if self.model_path.exists():
             try:
                 checkpoint = joblib.load(self.model_path)
                 self.classifier = checkpoint['classifier']
@@ -51,7 +54,7 @@ class TeamClassifierWrapper:
         self.classifier.fit(crops)
         
         # Save to disk
-        Path(self.model_path).parent.mkdir(parents=True, exist_ok=True)
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({'classifier': self.classifier}, self.model_path)
         print(f"Classifier saved to {self.model_path}")
 
@@ -66,38 +69,37 @@ class TeamClassifierWrapper:
                             players_team_ids: np.ndarray,
                             goalkeepers_xy: np.ndarray) -> np.ndarray:
         """
-        Assign goalkeepers to teams based on proximity to team centroids.
-        Fixed: handle empty teams to avoid NaN.
+        Atribui goleiros aos times baseado na proximidade da Mediana Espacial (Centro do bloco defensivo).
+        Operação 100% vetorizada para máxima performance.
         """
         if len(goalkeepers_xy) == 0:
-            return np.array([])
+            return np.array([], dtype=int)
         
-        # Calculate team centroids (handle empty teams)
         team_0_mask = players_team_ids == 0
         team_1_mask = players_team_ids == 1
         
+        # Uso de Mediana (Estado da arte para blocos defensivos) em vez de Média
         if np.sum(team_0_mask) == 0:
-            # No team 0 players, use team 1 centroid
-            team_0_centroid = np.mean(players_xy[team_1_mask], axis=0) if np.sum(team_1_mask) > 0 else np.array([0.0, 0.0])
+            median_0 = np.median(players_xy[team_1_mask], axis=0) if np.sum(team_1_mask) > 0 else np.array([0.0, 0.0])
         else:
-            team_0_centroid = np.mean(players_xy[team_0_mask], axis=0)
-        
+            median_0 = np.median(players_xy[team_0_mask], axis=0)
+            
         if np.sum(team_1_mask) == 0:
-            # No team 1 players, use team 0 centroid
-            team_1_centroid = np.mean(players_xy[team_0_mask], axis=0) if np.sum(team_0_mask) > 0 else np.array([0.0, 0.0])
+            median_1 = np.median(players_xy[team_0_mask], axis=0) if np.sum(team_0_mask) > 0 else np.array([0.0, 0.0])
         else:
-            team_1_centroid = np.mean(players_xy[team_1_mask], axis=0)
+            median_1 = np.median(players_xy[team_1_mask], axis=0)
+            
+        # Vetorização (Broadcasting) do cálculo de distância
+        # Forma: (M, 2) - (2,) -> (M, 2) -> norm -> (M,)
+        dist_0 = np.linalg.norm(goalkeepers_xy - median_0, axis=1)
+        dist_1 = np.linalg.norm(goalkeepers_xy - median_1, axis=1)
         
-        gk_team_ids = []
-        for gk_xy in goalkeepers_xy:
-            dist_0 = np.linalg.norm(gk_xy - team_0_centroid)
-            dist_1 = np.linalg.norm(gk_xy - team_1_centroid)
-            gk_team_ids.append(0 if dist_0 < dist_1 else 1)
+        # Retorna 0 se dist_0 < dist_1, senão 1 (Operação binária direta na memória em C)
+        gk_team_ids = np.where(dist_0 < dist_1, 0, 1)
         
-        return np.array(gk_team_ids)
+        return gk_team_ids
 
 
 if __name__ == "__main__":
-    # Test module
     classifier = TeamClassifierWrapper()
     print("Module test passed. TeamClassifier ready.")

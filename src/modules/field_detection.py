@@ -1,233 +1,191 @@
 """
 field_detection.py — VarzeaVision
-Detecção robusta de keypoints do campo com validação por reprojection error.
+Integração com PnLCalib (CVPR/CVIU 2024-2026) para detecção robusta
+de keypoints e cálculo de homografia usando modelo HRNet treinado no SoccerNet.
 
-Melhorias em relação à versão anterior:
-1. Validação por reprojection error: rejeita keypoints que não formam uma
-   homografia geometricamente coerente (erro > threshold em pixels).
-2. Seleção por RANSAC interna via cv2.findHomography(..., cv2.RANSAC):
-   elimina outliers automaticamente entre os keypoints detectados.
-3. Score de qualidade retornado junto com os pontos, permitindo que o
-   PitchMapper decida se aceita ou descarta o frame.
-4. Fallback gracioso: se menos de 4 keypoints válidos, retorna array vazio
-   com qualidade 0.0 — nunca levanta exceção no pipeline principal.
+PnLCalib é uma evolução do No-Bells-Just-Whistles com refinamento PnL não-linear.
 """
 
-import yaml
-import torch
+import sys
+import logging
 import numpy as np
 import cv2
-from ultralytics import YOLO
-from sports.configs.soccer import SoccerPitchConfiguration
+import torch
+import yaml
+import torchvision.transforms as T
+import torchvision.transforms.functional as f
 from pathlib import Path
+from PIL import Image
+
+from modules.common import load_config
+
+logger = logging.getLogger(__name__)
+
+PNLCALIB_PATH = Path(__file__).parent.parent.parent / "external" / "PnLCalib"
+NBJW_PATH = Path(__file__).parent.parent.parent / "external" / "no_bells_just_whistles"
+
+sys.path.insert(0, str(PNLCALIB_PATH))
+sys.path.insert(0, str(PNLCALIB_PATH / "utils"))
+sys.path.insert(0, str(PNLCALIB_PATH / "model"))
+
+from model.cls_hrnet import get_cls_net
+from model.cls_hrnet_l import get_cls_net as get_cls_net_l
+from utils.utils_heatmap import (
+    get_keypoints_from_heatmap_batch_maxpool,
+    get_keypoints_from_heatmap_batch_maxpool_l,
+    complete_keypoints,
+    coords_to_dict,
+)
 
 
 class FieldDetector:
+    """
+    Detecta a homografia do campo usando PnLCalib.
+    Retorna H (3x3) mapeando coordenadas do campo (metros) → pixels.
+    """
+
+    PITCH_LENGTH = 105.0
+    PITCH_WIDTH = 68.0
+
     def __init__(self, config_path=None):
-        module_dir = Path(__file__).parent
-        project_root = module_dir.parent
+        self.config = load_config(config_path)
 
-        if config_path is None:
-            config_path = project_root / "configs" / "config.yaml"
+        device_cfg = self.config.get("device", "cpu")
+        if device_cfg == "mps" and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda:0")
+        else:
+            self.device = torch.device("cpu")
+        logger.info(f"FieldDetector device: {self.device}")
 
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        fd_cfg = self.config["models"]["field_detection"]
+        weights_kp = fd_cfg.get("weights_kp")
+        weights_line = fd_cfg.get("weights_line")
 
-        self.device = self.config['device']
-        if self.device == 'mps' and not torch.backends.mps.is_available():
-            self.device = 'cpu'
-            print("MPS not available, falling back to CPU")
+        if not weights_kp or not weights_line:
+            raise ValueError(
+                "config.yaml precisa ter models.field_detection.weights_kp "
+                "e models.field_detection.weights_line"
+            )
 
-        # Carrega modelo de keypoints treinado
-        self.model_path = str(
-            project_root / "TCC_VarzeaVision_Keypoint_Backup/datasets/runs/pose/train/weights/best.pt"
+        use_wp_calib = fd_cfg.get("use_wp_calib", True)
+
+        if use_wp_calib:
+            from utils.utils_calib_wp import FramebyFrameCalib as _FramebyFrameCalib
+            logger.info("Using PnLCalib (wp) calibration")
+        else:
+            from utils.utils_calib import FramebyFrameCalib as _FramebyFrameCalib
+            logger.info("Using NBJW calibration")
+
+        cfg_path = PNLCALIB_PATH / "config" / "hrnetv2_w48.yaml"
+        cfg_l_path = PNLCALIB_PATH / "config" / "hrnetv2_w48_l.yaml"
+
+        cfg = yaml.safe_load(open(cfg_path))
+        cfg_l = yaml.safe_load(open(cfg_l_path))
+
+        actual_device = self._try_load_models(cfg, cfg_l, weights_kp, weights_line)
+
+        self.transform = T.Resize((540, 960))
+        self.kp_threshold = fd_cfg.get("keypoint_confidence_threshold", 0.15)
+        self.line_threshold = fd_cfg.get("line_threshold", 0.40)
+        self.pnl_refine = fd_cfg.get("pnl_refine", True)
+        self.use_wp_calib = use_wp_calib
+        self._FramebyFrameCalib = _FramebyFrameCalib
+
+        self._cam = None
+        self._frame_w = 0
+        self._frame_h = 0
+
+        logger.info(f"FieldDetector (PnLCalib) initialized on {actual_device}. pnl_refine={self.pnl_refine}")
+
+    def _try_load_models(self, cfg, cfg_l, weights_kp, weights_line):
+        for device in [self.device, torch.device("cpu")]:
+            try:
+                logger.info(f"Attempting to load models on {device}...")
+                state = torch.load(weights_kp, map_location=device)
+                self.model = get_cls_net(cfg)
+                self.model.load_state_dict(state)
+                self.model.to(device).eval()
+
+                state_l = torch.load(weights_line, map_location=device)
+                self.model_l = get_cls_net_l(cfg_l)
+                self.model_l.load_state_dict(state_l)
+                self.model_l.to(device).eval()
+
+                if device != self.device:
+                    logger.warning(f"MPS loading failed. Fell back to CPU.")
+                logger.info(f"Models loaded successfully on {device}.")
+                self.device = device
+                return device
+            except Exception as e:
+                logger.warning(f"Failed to load on {device}: {e}")
+                self.model = None
+                self.model_l = None
+                continue
+        raise RuntimeError(
+            f"Failed to load PnLCalib models from {weights_kp} and {weights_line} "
+            f"on MPS, CUDA, or CPU."
         )
-        try:
-            self.model = YOLO(self.model_path)
-            self.model.to(self.device)
-            print(f"Loaded trained keypoint model: {self.model_path}")
-        except Exception as e:
-            print(f"Failed to load trained model: {e}")
-            print("Falling back to yolov8x-pose-p6.pt...")
-            self.model = YOLO("yolov8x-pose-p6.pt")
-            self.model.to(self.device)
 
-        self.conf_threshold = self.config['models']['field_detection']['confidence_threshold']
-        self.keypoint_conf_threshold = self.config['models']['field_detection']['keypoint_confidence_threshold']
-
-        # Threshold de reprojection error em pixels.
-        # Valores acima disso indicam que a homografia estimada é ruim.
-        # 10px é conservador mas seguro para câmera tática a ~30m de distância.
-        self.max_reproj_error_px = self.config['models']['field_detection'].get(
-            'max_reproj_error_px', 10.0
-        )
-
-        self.config_pitch = SoccerPitchConfiguration()
-        # Vértices do campo em metros reais (divididos por 100 pois SoccerPitchConfig usa cm)
-        self._pitch_vertices_m = np.array(self.config_pitch.vertices, dtype=np.float64) / 100.0
-
-        print(f"FieldDetector initialized on device: {self.device}")
-        print(f"Keypoint conf threshold: {self.keypoint_conf_threshold}")
-        print(f"Max reprojection error: {self.max_reproj_error_px}px")
-
-    # ------------------------------------------------------------------
-    # Inferência bruta
-    # ------------------------------------------------------------------
-
-    def infer(self, frame: np.ndarray):
-        """Roda YOLOv8-pose e retorna o Results object."""
-        results = self.model.predict(
-            source=frame,
-            conf=self.conf_threshold,
-            imgsz=1280,
-            device=self.device,
-            verbose=False
-        )
-        return results[0]
-
-    # ------------------------------------------------------------------
-    # Extração de keypoints com score de qualidade
-    # ------------------------------------------------------------------
+    def reset_clip(self):
+        self._cam = None
+        logger.info("FieldDetector reset for new clip.")
 
     def get_keypoints(self, frame: np.ndarray) -> tuple:
-        """
-        Extrai keypoints válidos do frame e retorna junto com um score de
-        qualidade da homografia resultante.
-
-        Returns:
-            frame_points  : (N, 2) float64 — coordenadas em pixels no frame
-            pitch_points  : (N, 2) float64 — coordenadas em metros no campo real
-            quality_score : float em [0, 1] — 1.0 = homografia perfeita,
-                            0.0 = inválida ou sem pontos suficientes
-
-        A função NUNCA levanta exceção — retorna arrays vazios + quality=0.0
-        em qualquer condição de falha.
-        """
-        empty = np.empty((0, 2), dtype=np.float64)
-
-        try:
-            result = self.infer(frame)
-        except Exception as e:
-            print(f"[FieldDetector] Inference failed: {e}")
-            return empty, empty, 0.0
-
-        if not hasattr(result, 'keypoints') or result.keypoints is None:
-            return empty, empty, 0.0
-        if result.keypoints.conf is None or len(result.keypoints.conf) == 0:
-            return empty, empty, 0.0
-
-        # Seleciona a detecção com maior confiança média entre os keypoints
-        mean_confs = result.keypoints.conf.mean(dim=1)
-        best_idx = mean_confs.argmax().item()
-
-        kpts_xy   = result.keypoints.xy[best_idx].cpu().numpy().astype(np.float64)   # (K, 2)
-        kpts_conf = result.keypoints.conf[best_idx].cpu().numpy()                    # (K,)
-
-        # Filtra por confiança mínima
-        conf_mask = kpts_conf >= self.keypoint_conf_threshold
-
-        # Garante que o índice não excede o número de vértices conhecidos
-        n_vertices = len(self._pitch_vertices_m)
-        index_mask = np.arange(len(kpts_xy)) < n_vertices
-
-        valid_mask = conf_mask & index_mask
-        valid_indices = np.where(valid_mask)[0]
-
-        if len(valid_indices) < 4:
-            # Sem pontos suficientes para homografia
-            return empty, empty, 0.0
-
-        frame_pts = kpts_xy[valid_indices]               # (N, 2)
-        pitch_pts = self._pitch_vertices_m[valid_indices] # (N, 2)
-
-        # Valida a qualidade via reprojection error com RANSAC interno
-        quality = self._compute_quality(frame_pts, pitch_pts)
-
-        return frame_pts, pitch_pts, quality
-
-    # ------------------------------------------------------------------
-    # Validação por Reprojection Error
-    # ------------------------------------------------------------------
-
-    def _compute_quality(self, frame_pts: np.ndarray, pitch_pts: np.ndarray) -> float:
-        """
-        Estima a qualidade dos keypoints calculando uma homografia temporária
-        com RANSAC e medindo o reprojection error médio.
-
-        O RANSAC interno do cv2.findHomography já filtra outliers — então o
-        erro reportado é sobre os inliers, não sobre todos os pontos.
-
-        Returns:
-            float em [0, 1]:
-                1.0 → erro médio = 0px (perfeito)
-                0.5 → erro médio = max_reproj_error_px / 2
-                0.0 → homografia inválida ou erro > max_reproj_error_px
-        """
-        if len(frame_pts) < 4:
-            return 0.0
-
-        try:
-            # cv2.findHomography espera shapes (N,1,2) ou (N,2)
-            # Mapeia pitch_pts → frame_pts (inverso do que usamos no pipeline,
-            # mas só para calcular o erro de reprojeção aqui)
-            H, inlier_mask = cv2.findHomography(
-                pitch_pts.reshape(-1, 1, 2),
-                frame_pts.reshape(-1, 1, 2),
-                method=cv2.RANSAC,
-                ransacReprojThreshold=self.max_reproj_error_px
-            )
-        except cv2.error:
-            return 0.0
-
+        H, quality = self.get_homography(frame)
         if H is None:
-            return 0.0
+            empty = np.empty((0, 2), dtype=np.float64)
+            return empty, empty, 0.0
 
-        inliers = (inlier_mask.ravel() == 1)
-        n_inliers = inliers.sum()
+        corners_pitch = np.array([
+            [0., 0.],
+            [self.PITCH_LENGTH, 0.],
+            [self.PITCH_LENGTH, self.PITCH_WIDTH],
+            [0., self.PITCH_WIDTH],
+        ], dtype=np.float64)
 
-        if n_inliers < 4:
-            return 0.0
+        corners_frame = cv2.perspectiveTransform(
+            corners_pitch.reshape(-1, 1, 2), np.linalg.inv(H)
+        ).reshape(-1, 2)
 
-        # Reprojeção: transforma pitch_pts (inliers) de volta para pixels
-        pts_pitch_inliers = pitch_pts[inliers].reshape(-1, 1, 2)
-        pts_frame_inliers = frame_pts[inliers]
+        return corners_frame, corners_pitch, quality
 
-        projected = cv2.perspectiveTransform(pts_pitch_inliers, H)
-        projected = projected.reshape(-1, 2)
+    def get_homography(self, frame: np.ndarray) -> tuple:
+        h, w = frame.shape[:2]
+        if self._cam is None or self._frame_w != w or self._frame_h != h:
+            self._cam = self._FramebyFrameCalib(iwidth=w, iheight=h, denormalize=True)
+            self._frame_w = w
+            self._frame_h = h
 
-        errors = np.linalg.norm(projected - pts_frame_inliers, axis=1)
-        mean_error = errors.mean()
+        try:
+            params = self._run_inference(frame)
+        except Exception as e:
+            logger.warning(f"PnLCalib inference failed: {e}")
+            return None, 0.0
 
-        # Converte para score 0-1 (erro 0px → 1.0, erro ≥ threshold → 0.0)
-        quality = max(0.0, 1.0 - (mean_error / self.max_reproj_error_px))
+        if params is None:
+            return None, 0.0
 
-        # Penaliza levemente se poucos inliers (menos de 6 é instável)
-        inlier_ratio = n_inliers / len(frame_pts)
-        quality *= min(1.0, inlier_ratio * 1.5)
+        P = self._build_P(params)
+        H_f2p = self._P_to_H(P)
+        quality = self._estimate_quality(H_f2p, frame)
 
-        return float(quality)
+        try:
+            H_p2f = np.linalg.inv(H_f2p)
+            if abs(H_p2f[2, 2]) > 1e-8:
+                H_p2f = H_p2f / H_p2f[2, 2]
+        except np.linalg.LinAlgError:
+            return None, 0.0
 
-    # ------------------------------------------------------------------
-    # Utilitário de visualização (debug)
-    # ------------------------------------------------------------------
+        return H_p2f, quality
 
-    def draw_keypoints(self, frame: np.ndarray,
-                       keypoints: np.ndarray,
-                       quality: float = None) -> np.ndarray:
-        """Desenha keypoints no frame com cor indicando a qualidade."""
+    def draw_keypoints(self, frame: np.ndarray, keypoints: np.ndarray, quality: float = None) -> np.ndarray:
         annotated = frame.copy()
         if len(keypoints) == 0:
             return annotated
 
-        # Verde = boa qualidade, Vermelho = ruim
-        if quality is None:
-            color = (0, 165, 255)  # laranja padrão
-        elif quality >= 0.7:
-            color = (0, 220, 0)    # verde
-        elif quality >= 0.4:
-            color = (0, 165, 255)  # laranja
-        else:
-            color = (0, 0, 220)    # vermelho
+        color = (0, 220, 0) if (quality or 0) >= 0.7 else (0, 165, 255) if (quality or 0) >= 0.4 else (0, 0, 220)
 
         for i, (x, y) in enumerate(keypoints):
             cv2.circle(annotated, (int(x), int(y)), 6, color, -1)
@@ -235,13 +193,180 @@ class FieldDetector:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
         if quality is not None:
-            label = f"KP quality: {quality:.2f} ({len(keypoints)} pts)"
+            label = f"PnLCalib quality: {quality:.2f}"
             cv2.putText(annotated, label, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
         return annotated
 
+    def _run_inference(self, frame: np.ndarray) -> dict | None:
+        if self.model is None or self.model_l is None:
+            logger.error("Models not loaded. Cannot run inference.")
+            return None
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(img)
+        tensor = f.to_tensor(img).float().unsqueeze(0)
+
+        if tensor.size()[-1] != 960:
+            tensor = self.transform(tensor)
+        tensor = tensor.to(self.device)
+
+        with torch.no_grad():
+            heatmaps = self.model(tensor)
+            heatmaps_l = self.model_l(tensor)
+
+        _, _, h, w = tensor.size()
+        kp_coords = get_keypoints_from_heatmap_batch_maxpool(heatmaps[:, :-1, :, :])
+        line_coords = get_keypoints_from_heatmap_batch_maxpool_l(heatmaps_l[:, :-1, :, :])
+        kp_list = coords_to_dict(kp_coords, threshold=self.kp_threshold)
+        lines_list = coords_to_dict(line_coords, threshold=self.line_threshold)
+
+        kp_dict_0   = kp_list[0]
+        lines_dict_0 = lines_list[0] if lines_list else {}
+        kp_completed, lines_completed = complete_keypoints(
+            kp_dict_0, lines_dict_0, w=w, h=h, normalize=True
+        )
+
+        kp_count   = sum(1 for k in kp_completed if k <= 57)
+        line_count = len(lines_completed)
+        logger.info(
+            f"[PnLCalib] kp_detected={kp_count}, lines_detected={line_count}, "
+            f"frame_size={w}x{h}, threshold_kp={self.kp_threshold}, threshold_line={self.line_threshold}"
+        )
+
+        # ── calibração inicial ──────────────────────────────────────────────────────
+        if not hasattr(self._cam, 'intrinsics') or self._cam.intrinsics is None:
+            fx = fy = float(max(self._frame_w, self._frame_h))
+            K    = np.array([[fx, 0., self._frame_w / 2.],
+                            [0., fy, self._frame_h / 2.],
+                            [0.,  0.,              1.  ]], dtype=np.float64)
+            dist = np.zeros(5, dtype=np.float64)
+        else:
+            K    = self._cam.intrinsics
+            dist = self._cam.distortion
+
+        calibration = {"intrinsics": K, "distortion": dist}
+        self._cam.update(calibration, kp_completed, lines_completed)
+        # ────────────────────────────────────────────────────────────────────────────
+
+        if self._cam.intrinsics is None:
+            H_init, _ = self._cam.get_homography_from_ground_plane(
+                use_ransac=10, inverse=False, refine_lines=False
+            )
+            if H_init is not None:
+                self._cam.estimate_calibration_matrix_from_plane_homography(H_init)
+
+        params = self._cam.heuristic_voting(refine_lines=self.pnl_refine)
+
+        if params is None:
+            cam_params, ret = self._cam.get_cam_params(mode="full", use_ransac=15, refine=False, refine_w_lines=False)
+            if cam_params is not None and ret:
+                params = {"cam_params": cam_params, "mode": "full_fallback"}
+            if params is None:
+                cam_params, ret = self._cam.get_cam_params(mode="ground_plane", use_ransac=15, refine=False, refine_w_lines=False)
+                if cam_params is not None and ret:
+                    params = {"cam_params": cam_params, "mode": "ground_plane_fallback"}
+
+        return params
+
+    def _build_P(self, params: dict) -> np.ndarray:
+        cam = params["cam_params"]
+
+        fl_x = float(cam["x_focal_length"])
+        fl_y = float(cam["y_focal_length"])
+        px, py = cam["principal_point"]
+
+        K = np.array([
+            [fl_x, 0., float(px)],
+            [0., fl_y, float(py)],
+            [0., 0., 1.],
+        ], dtype=np.float64)
+
+        R = np.array(cam["rotation_matrix"], dtype=np.float64).reshape(3, 3)
+        pos = np.array(cam["position_meters"], dtype=np.float64).reshape(3, 1)
+        t = -R @ pos
+
+        Rt = np.hstack([R, t])
+        P = K @ Rt
+
+        return P
+
+    def _P_to_H(self, P: np.ndarray) -> np.ndarray:
+        H = P[:, [0, 1, 3]].copy().astype(np.float64)
+        if abs(H[2, 2]) > 1e-8:
+            H = H / H[2, 2]
+        return H
+
+    def _estimate_quality(self, H: np.ndarray, frame: np.ndarray) -> float:
+        if H is None:
+            return 0.0
+
+        h, w = frame.shape[:2]
+
+        corners = np.array([
+            [0.0, 0.0, 1.0],
+            [self.PITCH_LENGTH, 0.0, 1.0],
+            [self.PITCH_LENGTH, self.PITCH_WIDTH, 1.0],
+            [0.0, self.PITCH_WIDTH, 1.0],
+        ], dtype=np.float64)
+
+        projected = []
+        for c in corners:
+            p = H @ c
+            if abs(p[2]) > 1e-8:
+                p = p / p[2]
+            projected.append(p[:2])
+
+        projected = np.array(projected)
+
+        margin = 0.3
+        in_frame = (
+            (projected[:, 0] > -w * margin) &
+            (projected[:, 0] < w * (1 + margin)) &
+            (projected[:, 1] > -h * margin) &
+            (projected[:, 1] < h * (1 + margin))
+        )
+
+        return float(in_frame.mean())
+
 
 if __name__ == "__main__":
+    import cv2
+
     detector = FieldDetector()
-    print("Module test passed. FieldDetector ready.")
+
+    caminho_img = "src/data/seu_frame.jpg"
+    frame = cv2.imread(caminho_img)
+
+    if frame is None:
+        print(f"Imagem não encontrada: {caminho_img}")
+    else:
+        H, quality = detector.get_homography(frame)
+        print(f"quality: {quality:.3f}")
+
+        if H is not None:
+            H_f2p = np.linalg.inv(H)
+
+            corners = np.array([
+                [0.0, 0.0],
+                [105.0, 0.0],
+                [105.0, 68.0],
+                [0.0, 68.0],
+            ], dtype=np.float64)
+
+            for pt in corners:
+                p = H_f2p @ np.array([pt[0], pt[1], 1.0])
+                if abs(p[2]) > 1e-8:
+                    p = p / p[2]
+                    x, y = int(p[0]), int(p[1])
+
+                    if -10000 < x < 10000 and -10000 < y < 10000:
+                        cv2.circle(frame, (x, y), 15, (0, 0, 255), -1)
+
+            centro = H_f2p @ np.array([52.5, 34.0, 1.0])
+            if abs(centro[2]) > 1e-8:
+                centro = centro / centro[2]
+                cv2.circle(frame, (int(centro[0]), int(centro[1])), 15, (0, 255, 0), -1)
+
+        cv2.imwrite("src/data/homografia_teste.jpg", frame)
+        print("Salvo em src/data/homografia_teste.jpg")

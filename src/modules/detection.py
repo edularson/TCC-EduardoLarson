@@ -1,26 +1,21 @@
-import yaml
 import torch
 import cv2
 import numpy as np
 from ultralytics import YOLO
 from pathlib import Path
 
+# Importando a nossa Camada de Configuração Otimizada (Memória Cache)
+from modules.common import load_config
+
 class FootballDetector:
     def __init__(self, config_path=None):
-        if config_path is None:
-            # Get absolute path to config (module location -> project root -> configs/config.yaml)
-            module_dir = Path(__file__).parent
-            project_root = module_dir.parent
-            config_path = project_root / "configs" / "config.yaml"
-        
-        # Load config
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        # I/O zero-latency: Carrega direto da memória
+        self.config = load_config(config_path)
         
         # Set device (MPS for M4 Pro, fallback to CPU)
         self.device = self.config['device']
         if self.device == 'mps' and not torch.backends.mps.is_available():
-            print(f"MPS not available, falling back to CPU")
+            print("MPS not available, falling back to CPU")
             self.device = 'cpu'
         
         # Load detection model (local YOLOv8 weights)
@@ -54,40 +49,33 @@ class FootballDetector:
 
     def get_detections(self, frame: np.ndarray) -> tuple:
         """
-        Returns:
-          - balls: list of (x1,y1,x2,y2,conf)
-          - players: list of (x1,y1,x2,y2,conf,class_id)
-          - goalkeepers: list of (x1,y1,x2,y2,conf,class_id)
-          - referees: list of (x1,y1,x2,y2,conf,class_id)
+        Extrai detecções de forma vetorizada, mitigando o overhead de sincronização de tensores.
+        Retorna arrays NumPy no formato (N, 5) para bolas e (N, 6) para os demais,
+        onde as colunas são: [x1, y1, x2, y2, conf, (opcional: cls_id)].
         """
         result = self.infer(frame)
-        if result.boxes is None or len(result.boxes) == 0:
-            return [], [], [], []
+        if result.boxes is None or len(result.boxes.cls) == 0:
+            return np.empty((0, 5)), np.empty((0, 6)), np.empty((0, 6)), np.empty((0, 6))
         
-        boxes = result.boxes
-        balls, players, goalkeepers, referees = [], [], [], []
+        # Sincronização única GPU -> CPU (Máxima Performance)
+        boxes_data = result.boxes.data.cpu().numpy() # [N, 6] -> [x1, y1, x2, y2, conf, cls]
         
-        for box in boxes:
-            cls_id = int(box.cls[0])
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            
-            if cls_id == self.class_ids['ball']:
-                balls.append((x1, y1, x2, y2, conf))
-            elif cls_id == self.class_ids['player']:
-                players.append((x1, y1, x2, y2, conf, cls_id))
-            elif cls_id == self.class_ids['goalkeeper']:
-                goalkeepers.append((x1, y1, x2, y2, conf, cls_id))
-            elif cls_id == self.class_ids['referee']:
-                referees.append((x1, y1, x2, y2, conf, cls_id))
+        classes = boxes_data[:, 5].astype(int)
+        
+        # Máscaras booleanas (Operação O(N) em C, sem loops em Python)
+        mask_ball = (classes == self.class_ids['ball'])
+        mask_player = (classes == self.class_ids['player'])
+        mask_gk = (classes == self.class_ids['goalkeeper'])
+        mask_ref = (classes == self.class_ids['referee'])
+        
+        # Bola não precisa do cls_id no retorno segundo a sua assinatura
+        balls = boxes_data[mask_ball][:, :5] 
+        players = boxes_data[mask_player]
+        goalkeepers = boxes_data[mask_gk]
+        referees = boxes_data[mask_ref]
         
         return balls, players, goalkeepers, referees
 
-    def filter_low_confidence(self, detections: list, conf_threshold: float = None) -> list:
-        """Filter detections by confidence threshold."""
-        if conf_threshold is None:
-            conf_threshold = self.conf_threshold
-        return [d for d in detections if d[4] >= conf_threshold]
 
     def get_ball_center(self, ball_detection: tuple) -> tuple:
         """Get center (x,y) of ball bbox."""
