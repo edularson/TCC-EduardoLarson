@@ -91,7 +91,7 @@ class BallKalmanTracker:
         self.gate_sigma        = gate_sigma
         self._missing          = 0
         self._initialized      = False
-        self._last_valid_bbox  = None  # (x1,y1,x2,y2,conf) — para fallback
+        self._last_valid_bbox  = None
 
         # ── Matrizes do Kalman Filter ─────────────────────────────────────────
         # Estado: [x, y, vx, vy]

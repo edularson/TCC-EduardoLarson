@@ -1,4 +1,5 @@
 import cv2
+import json
 import numpy as np
 import supervision as sv
 from pathlib import Path
@@ -13,11 +14,13 @@ from modules.homography import PitchMapper
 from modules.shot_detection import ShotDetector
 from modules.xg_model import XGModel
 from modules.team_classifier import TeamClassifierWrapper
+from modules.analytics import MatchAnalytics, draw_analytics_panel
 from modules.utils import (
     draw_detections_on_frame,
     draw_shot_event,
-    create_radar_view,
+    draw_radar_on_frame,
     draw_pitch_with_xg,
+    SHOT_OVERLAY_DURATION_S,
 )
 
 
@@ -31,9 +34,6 @@ class VarzeaVisionPipeline:
 
         self.detector        = FootballDetector(config_path)
         self.tracker         = FootballTracker(config_path)
-        # Opção 4: BallKalmanTracker substitui BallTracker simples.
-        # Kalman Filter [x, y, vx, vy] rejeita detecções improváveis via
-        # gate de Mahalanobis — elimina saltos para marcações estáticas do campo.
         self.ball_tracker    = BallKalmanTracker(
             max_missing_frames=8,
             process_noise=10.0,
@@ -45,6 +45,7 @@ class VarzeaVisionPipeline:
         self.shot_detector   = ShotDetector(config_path)
         self.xg_model        = XGModel(config_path)
         self.team_classifier = TeamClassifierWrapper(config_path)
+        self.analytics       = MatchAnalytics()
 
         self._last_H_nbjw     = None
         self._last_kp_quality = 0.0
@@ -55,6 +56,17 @@ class VarzeaVisionPipeline:
         self.shot_events        = []
         self.tracker_id_to_team = {}
         self.ball_positions     = {}
+
+        self._last_shot_tuple = None
+        self._last_shot_xg    = None
+        self._last_shot_time  = -999.0
+
+        # ── detecção automática de orientação ────────────────────────────────
+        # Acumula posições X dos dois times nos primeiros frames para
+        # determinar para qual lado cada time ataca.
+        self._attack_direction_set  = False
+        self._team_x_accum          = {0: [], 1: []}
+        self._attack_detection_frames = 30   # frames usados para detectar orientação
 
         print("Pipeline initialized successfully!\n")
 
@@ -131,9 +143,58 @@ class VarzeaVisionPipeline:
         for tid, team_id in zip(gk_tids, gk_team_ids):
             self.tracker_id_to_team[int(tid)] = int(team_id)
 
+    def _auto_detect_attack_direction(self, pitch_xy_real: np.ndarray,
+                                      sv_detections: sv.Detections):
+        """
+        Detecta automaticamente para qual lado cada time ataca.
+
+        Lógica: acumula a posição X média de cada time nos primeiros
+        _attack_detection_frames frames. O time com média X menor está
+        no lado esquerdo do campo — logo ataca para a direita (x=105).
+        O time com média X maior está no lado direito — ataca para x=0.
+
+        Só executa até a orientação ser definida. Após isso, trava.
+        """
+        if self._attack_direction_set:
+            return
+
+        player_mask = (sv_detections.class_id == 2) | (sv_detections.class_id == 1)
+        if not np.any(player_mask):
+            return
+
+        p_xy  = pitch_xy_real[player_mask]
+        p_tms = np.array([
+            self.tracker_id_to_team.get(int(tid), -1)
+            for tid in sv_detections.tracker_id[player_mask]
+        ])
+
+        for xy, tm in zip(p_xy, p_tms):
+            if tm in (0, 1):
+                self._team_x_accum[tm].append(float(xy[0]))
+
+        # só trava quando tiver dados suficientes dos dois times
+        if (len(self._team_x_accum[0]) >= self._attack_detection_frames and
+                len(self._team_x_accum[1]) >= self._attack_detection_frames):
+
+            mean_x0 = float(np.mean(self._team_x_accum[0]))
+            mean_x1 = float(np.mean(self._team_x_accum[1]))
+
+            # time 0 com X médio menor → está no lado esquerdo → ataca para direita
+            team0_attacks_right = mean_x0 < mean_x1
+
+            self.pitch_mapper.set_attack_direction(team0_attacks_right)
+            self._attack_direction_set = True
+
+            side0 = "direita (x=105)" if team0_attacks_right else "esquerda (x=0)"
+            side1 = "esquerda (x=0)" if team0_attacks_right else "direita (x=105)"
+            print(f"\n[AutoDetect] Orientação detectada automaticamente:")
+            print(f"  Team 0 → ataca para {side0} (mean_x={mean_x0:.1f}m)")
+            print(f"  Team 1 → ataca para {side1} (mean_x={mean_x1:.1f}m)\n")
+
     # ── pipeline principal ───────────────────────────────────────────────────
 
-    def process_clip(self, video_path: str, output_path: str = None):
+    def process_clip(self, video_path: str, output_path: str = None,
+                     team0_name: str = "Team A", team1_name: str = "Team B"):
         print(f"\n{'=' * 60}")
         print(f"Processing clip: {video_path}")
         print(f"{'=' * 60}\n")
@@ -149,9 +210,15 @@ class VarzeaVisionPipeline:
         self.pitch_mapper.reset_clip()
         self.shot_detector.reset_clip()
         self.field_detector.reset_clip()
-        self._last_H_nbjw     = None
-        self._last_kp_quality = 0.0
-        self.transformer      = None
+        self.analytics.reset()
+        self._last_H_nbjw           = None
+        self._last_kp_quality       = 0.0
+        self.transformer            = None
+        self._last_shot_tuple       = None
+        self._last_shot_xg          = None
+        self._last_shot_time        = -999.0
+        self._attack_direction_set  = False
+        self._team_x_accum          = {0: [], 1: []}
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -188,7 +255,7 @@ class VarzeaVisionPipeline:
             if len(sv_detections) > 0:
                 sv_detections = self.tracker.update(frame, sv_detections)
 
-            # 2b. Tracking da bola com Kalman Filter
+            # 2b. Tracking da bola
             best_ball = self.ball_tracker.update(balls)
 
             # 3. Team classification
@@ -220,7 +287,12 @@ class VarzeaVisionPipeline:
                 pitch_xy_real = self.pitch_mapper.frame_to_pitch(self.transformer, feet_pixels)
                 self._resolve_goalkeepers(sv_detections, pitch_xy_real)
 
+                # detecta orientação automaticamente nos primeiros frames
+                if not self._attack_direction_set:
+                    self._auto_detect_attack_direction(pitch_xy_real, sv_detections)
+
             # 5. Shot detection
+            ball_pos_real = None
             if best_ball is not None and self.transformer is not None and self.pitch_mapper.is_warmed_up:
                 ball_center   = self.detector.get_ball_center(best_ball)
                 ball_pos_real = self.pitch_mapper.frame_to_pitch(
@@ -294,23 +366,9 @@ class VarzeaVisionPipeline:
                                     'body_part': 'foot',
                                 })
 
-                                shot_tuple = (closest_tid, float(shot_data['confidence']), "detected")
-                                frame = draw_shot_event(frame, shot_tuple, xg_value)
-
-                    # Radar overlay
-                    if pitch_xy_real is not None and len(pitch_xy_real) >= 2:
-                        team_ids_arr = np.array([
-                            self.tracker_id_to_team.get(int(t), 0)
-                            for t in sv_detections.tracker_id
-                        ])
-                        radar = create_radar_view(pitch_xy_real, team_ids_arr, ball_pos_real)
-                        rh, rw      = radar.shape[:2]
-                        new_w       = int(rw * 0.3)
-                        new_h       = int(rh * 0.3)
-                        radar_small = cv2.resize(radar, (new_w, new_h))
-                        h_fr, w_fr  = frame.shape[:2]
-                        if new_h <= h_fr and new_w <= w_fr:
-                            frame[h_fr - new_h:h_fr, w_fr - new_w:w_fr] = radar_small
+                                self._last_shot_tuple = (closest_tid, float(shot_data['confidence']), "detected")
+                                self._last_shot_xg    = xg_value
+                                self._last_shot_time  = frame_time
 
                 h_fr, w_fr = frame.shape[:2]
                 pos_text = f"Ball: ({ball_pos_real[0]:.1f}, {ball_pos_real[1]:.1f})"
@@ -318,6 +376,51 @@ class VarzeaVisionPipeline:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 cv2.putText(frame, pos_text, (10, h_fr - 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+
+            # 5b. Atualiza analytics
+            if valid_tracking and pitch_xy_real is not None:
+                team_ids_arr = np.array([
+                    self.tracker_id_to_team.get(int(t), -1)
+                    for t in sv_detections.tracker_id
+                ])
+                self.analytics.update(
+                    pitch_xy_real=pitch_xy_real,
+                    tracker_ids=sv_detections.tracker_id,
+                    team_ids=team_ids_arr,
+                    class_ids=sv_detections.class_id,
+                    ball_pos=ball_pos_real,
+                    frame_time=frame_time,
+                )
+
+            # ── overlays visuais ─────────────────────────────────────────────
+
+            # shot overlay persistente (5s)
+            elapsed = frame_time - self._last_shot_time
+            if self._last_shot_tuple is not None and elapsed < SHOT_OVERLAY_DURATION_S:
+                frame = draw_shot_event(frame, self._last_shot_tuple,
+                                        self._last_shot_xg, elapsed_s=elapsed)
+
+            # painel de analytics
+            if valid_tracking:
+                frame = draw_analytics_panel(
+                    frame, self.analytics, team0_name, team1_name
+                )
+
+            # minimapa centralizado
+            if valid_tracking and pitch_xy_real is not None:
+                team_ids_arr = np.array([
+                    self.tracker_id_to_team.get(int(t), 0)
+                    for t in sv_detections.tracker_id
+                ])
+                frame = draw_radar_on_frame(
+                    frame,
+                    pitch_xy_real,
+                    team_ids_arr,
+                    pitch_ball_xy_m=ball_pos_real,
+                    scale=0.28,
+                    team0_name=team0_name,
+                    team1_name=team1_name,
+                )
 
             # 6. Anotação visual
             if valid_tracking:
@@ -357,9 +460,39 @@ class VarzeaVisionPipeline:
         print(f"\nProcessing complete! Output: {output_path}")
         print(f"Detected {len(self.shot_events)} shot events")
 
+        # ── exportações finais ────────────────────────────────────────────────
+        out_dir = Path(output_path).parent
+
         if self.shot_events:
             shot_map_path = output_path.replace('.mp4', '_shot_map.png')
             self._save_shot_map(shot_map_path)
+
+        heatmap_paths = self.analytics.save_heatmaps(
+            str(out_dir), team0_name, team1_name
+        )
+        print(f"Heatmaps saved: {list(heatmap_paths.values())}")
+
+        summary  = self.analytics.get_summary(team0_name, team1_name)
+        results  = {
+            'video':       video_path,
+            'team0':       team0_name,
+            'team1':       team1_name,
+            'shot_events': self.shot_events,
+            'analytics':   summary,
+        }
+        json_path = output_path.replace('.mp4', '_results.json')
+        with open(json_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"Results JSON saved: {json_path}")
+
+        print("\n── Resumo Analítico ──────────────────────────────")
+        poss = summary['possession']
+        print(f"Posse:      {team0_name} {poss[team0_name]}%  |  {team1_name} {poss[team1_name]}%")
+        dist = summary['total_distance_km']
+        print(f"Distância:  {team0_name} {dist[team0_name]} km  |  {team1_name} {dist[team1_name]} km")
+        vmax = summary['max_speed_kmh']
+        print(f"Vmax:       {team0_name} {vmax[team0_name]} km/h  |  {team1_name} {vmax[team1_name]} km/h")
+        print("─────────────────────────────────────────────────")
 
         return self.shot_events
 
@@ -407,7 +540,7 @@ class VarzeaVisionPipeline:
         from sports.annotators.soccer import draw_pitch
 
         config   = SoccerPitchConfiguration()
-        shot_map = draw_pitch(config, background_color=sv.Color.from_hex('4a7c3f'))
+        shot_map = draw_pitch(config, background_color=sv.Color.from_hex('1a3320'))
 
         for event in self.shot_events:
             pos = np.array(event['position'])
@@ -424,12 +557,16 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("[1/2] TREINAMENTO DE RECONHECIMENTO DE UNIFORMES")
     print("=" * 60)
-    pipeline.auto_train_team_classifier("src/data/SPAINxCROATIA1.mp4")
+    pipeline.auto_train_team_classifier("src/data/BARxREAL.mp4")
 
     print("\n" + "=" * 60)
     print("[2/2] INICIANDO PROCESSAMENTO TÁTICO")
     print("=" * 60)
-    events = pipeline.process_clip("src/data/SPAINxCROATIA2.mp4")
+    events = pipeline.process_clip(
+        "src/data/BARxREAL.mp4",
+        team0_name="Barcelona",
+        team1_name="Real Madrid",
+    )
 
     print("\nResumo Final de Eventos:")
     for ev in events:

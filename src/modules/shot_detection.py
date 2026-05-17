@@ -169,13 +169,13 @@ class ShotDetector:
             player_to_ball_norm = player_to_ball / norm_ptb if norm_ptb > 1e-6 else np.zeros(2)
             direction_alignment = float(np.dot(player_to_ball_norm, ball_to_goal_norm))
 
-        if direction_alignment < 0.3:
+        if direction_alignment < 0.5:  # elevado de 0.3 — exige direção mais alinhada ao gol
             return False, 0.0, f"direction={direction_alignment:.2f} < 0.3"
 
         dist_score      = max(0.0, 1.0 - (player_ball_dist / self.max_player_ball_dist))
         speed_score     = min(ball_speed / (self.min_ball_speed * 3), 1.0)
         direction_score = (direction_alignment + 1.0) / 2.0
-        confidence      = (dist_score * 0.30) + (speed_score * 0.45) + (direction_score * 0.25)
+        confidence      = (dist_score * 0.25) + (speed_score * 0.35) + (direction_score * 0.40)  # direção mais importante que velocidade
 
         reason = (
             f"SHOT: dist={player_ball_dist:.1f}m | speed={ball_speed:.1f}m/s | "

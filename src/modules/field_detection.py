@@ -296,7 +296,41 @@ class FieldDetector:
         if abs(H[2, 2]) > 1e-8:
             H = H / H[2, 2]
         return H
+    
+    def _estimate_quality(self, H: np.ndarray, frame: np.ndarray) -> float:
+        if H is None:
+            return 0.0
 
+        h, w = frame.shape[:2]
+
+        # CORREÇÃO: Usar o sistema de coordenadas centrado do PnLCalib!
+        corners = np.array([
+            [-52.5, -34.0, 1.0],
+            [ 52.5, -34.0, 1.0],
+            [ 52.5,  34.0, 1.0],
+            [-52.5,  34.0, 1.0],
+        ], dtype=np.float64)
+
+        projected = []
+        for c in corners:
+            p = H @ c
+            if abs(p[2]) > 1e-8:
+                p = p / p[2]
+            projected.append(p[:2])
+
+        projected = np.array(projected)
+
+        margin = 0.3
+        in_frame = (
+            (projected[:, 0] > -w * margin) &
+            (projected[:, 0] < w * (1 + margin)) &
+            (projected[:, 1] > -h * margin) &
+            (projected[:, 1] < h * (1 + margin))
+        )
+
+        return float(in_frame.mean())
+    
+    '''
     def _estimate_quality(self, H: np.ndarray, frame: np.ndarray) -> float:
         if H is None:
             return 0.0
@@ -328,6 +362,7 @@ class FieldDetector:
         )
 
         return float(in_frame.mean())
+        '''
 
 
 if __name__ == "__main__":
