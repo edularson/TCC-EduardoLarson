@@ -1,0 +1,117 @@
+# Configuration
+
+# Model paths
+models:
+  detection:
+    path: "src/runs/detect/train/weights/best.pt"
+    class_names: ["ball", "goalkeeper", "player", "referee"]
+    class_ids:
+      ball: 0
+      goalkeeper: 1
+      player: 2
+      referee: 3
+    confidence_threshold: 0.55
+    nms_threshold: 0.5
+    imgsz: 640
+  ball_detection:
+    path: "src/runs/detect/ball_only/weights/best.pt"
+    confidence_threshold: 0.35
+  field_detection:
+    weights_kp: "external/PnLCalib/weights/SV_FT_WC14_kp.pth"
+    weights_line: "external/PnLCalib/weights/SV_FT_TSWC_lines.pth"
+    keypoint_confidence_threshold: 0.15
+    line_threshold: 0.40
+    pnl_refine: true
+    use_wp_calib: true
+  reid:
+    path: ""
+
+# Tracking
+tracking:
+  type: "botsort"
+  tracker_config: "botsort.yaml"
+  max_age: 30
+  min_hits: 3
+
+# Shot detection
+shot_detection:
+  max_player_ball_distance: 3.0
+  min_ball_speed: 5.0
+  goal_proximity_distance: 25.0
+  velocity_window_frames: 5
+  shot_cooldown: 3.0
+
+# xG model
+xg:
+  model_type: "neural_network"
+  statsbomb_competitions:
+    # --- Champions e Bundesliga ---
+    - {competition_id: 16, season_id: 4}   # Champions League 2018/2019
+    - {competition_id: 9,  season_id: 281} # 1. Bundesliga 2023/2024
+    - {competition_id: 9,  season_id: 27}  # 1. Bundesliga 2015/2016
+
+    # --- Copas do Mundo ---
+    - {competition_id: 43, season_id: 106} # FIFA World Cup 2022
+    - {competition_id: 43, season_id: 3}   # FIFA World Cup 2018
+
+    # --- Torneios de Seleções Continentais ---
+    - {competition_id: 55, season_id: 282} # UEFA Euro 2024
+    - {competition_id: 55, season_id: 43}  # UEFA Euro 2020
+    - {competition_id: 223, season_id: 282} # Copa América 2024
+
+    # --- La Liga ---
+    - {competition_id: 11, season_id: 90}  # La Liga 2020/2021
+    - {competition_id: 11, season_id: 42}  # La Liga 2019/2020
+    - {competition_id: 11, season_id: 4}   # La Liga 2018/2019
+    - {competition_id: 11, season_id: 1}   # La Liga 2017/2018
+    - {competition_id: 11, season_id: 2}   # La Liga 2016/2017
+    - {competition_id: 11, season_id: 27}  # La Liga 2015/2016
+    - {competition_id: 11, season_id: 26}  # La Liga 2014/2015
+    - {competition_id: 11, season_id: 25}  # La Liga 2013/2014
+    - {competition_id: 11, season_id: 24}  # La Liga 2012/2013
+    - {competition_id: 11, season_id: 23}  # La Liga 2011/2012
+    - {competition_id: 11, season_id: 22}  # La Liga 2010/2011
+    - {competition_id: 11, season_id: 21}  # La Liga 2009/2010
+    - {competition_id: 11, season_id: 41}  # La Liga 2008/2009
+    - {competition_id: 11, season_id: 40}  # La Liga 2007/2008
+    - {competition_id: 11, season_id: 39}  # La Liga 2006/2007
+
+    # --- Premier League ---
+    - {competition_id: 2, season_id: 27}   # Premier League 2015/2016
+    - {competition_id: 2, season_id: 44}   # Premier League 2003/2004
+
+    # --- Serie A ---
+    - {competition_id: 12, season_id: 27}  # Serie A 2015/2016
+
+    # --- Ligue 1 ---
+    - {competition_id: 7, season_id: 27}   # Ligue 1 2015/2016
+    - {competition_id: 7, season_id: 235}  # Ligue 1 2022/2023
+    - {competition_id: 7, season_id: 108}  # Ligue 1 2021/2022
+
+  features:
+    - "shot_distance"
+    - "shot_angle"
+    - "body_part_foot"
+    - "body_part_head"
+    - "def_pressure"
+
+# Homography
+homography:
+  min_quality_threshold: 0.15
+  warmup_frames: 5
+  history_size: 10
+  kalman_process_noise: 0.0001
+  kalman_measurement_noise: 0.01
+  invert_x_axis: false
+  recompute_threshold: 0.3
+
+# Possession and heatmap
+analytics:
+  possession_radius_m: 3.0      # distância máxima jogador-bola para contar posse
+  heatmap_grid_w: 105           # resolução da grade do heatmap (pixels por metro)
+  heatmap_grid_h: 68
+  heatmap_blur_kernel: 21       # tamanho do kernel gaussiano
+  heatmap_alpha: 0.55           # transparência do heatmap sobre o campo
+
+# Device
+device: "mps"

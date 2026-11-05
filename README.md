@@ -1,34 +1,117 @@
-# Análise de futebol com visão computacional
+# VarzeaVision
 
-Trabalho de Conclusão de Curso de Eduardo Larson, do Bacharelado em Ciência da Computação da UNICENTRO, sobre análise de futebol a partir de transmissões de TV.
+Análise tática de futebol a partir de vídeos de transmissão, com detecção e rastreamento de jogadores e bola, calibração de campo, reconhecimento de finalizações e estimativa de Expected Goals (xG).
 
-O sistema integra detecção de jogadores e bola, rastreamento, reconhecimento de eventos de finalização e cálculo de Expected Goals (xG), uma estimativa da probabilidade de uma finalização resultar em gol.
+Projeto do Trabalho de Conclusão de Curso de **Eduardo Larson**, orientado pelo **Prof. Dr. Daniel Rigoni**, no Bacharelado em Ciência da Computação da **UNICENTRO**, em 2026.
 
-## Tecnologias
+![Exemplo de detecção e rastreamento apresentado na defesa](docs/images/frame-processado.jpeg)
 
-Python, PyTorch, YOLOv8 e OpenCV.
+Exemplo extraído da apresentação do TCC. As imagens de transmissão pertencem aos respectivos titulares.
 
-## Etapas do sistema
+## O que o projeto implementa
 
-1. Processamento do vídeo de uma partida.
-2. Detecção de jogadores e bola.
-3. Rastreamento dos elementos detectados.
-4. Identificação de eventos de finalização.
-5. Cálculo de xG para as finalizações identificadas.
+- Detecção de jogadores, goleiros, árbitros e bola com YOLOv8, incluindo detector especializado de bola.
+- Rastreamento de jogadores com BoT-SORT e da bola com Kalman, gate de Mahalanobis e optical flow.
+- Classificação de times por aparência dos uniformes.
+- Calibração do campo com PnLCalib e transformação para coordenadas métricas por homografia.
+- Identificação de finalizações por proximidade, velocidade e direção da bola.
+- XGNet em PyTorch para estimar a probabilidade de gol a partir de seis atributos espaciais e contextuais.
+- Vídeo anotado, minimapa tático, mapas de finalizações, mapas de calor e estimativas de posse.
 
-## Contexto acadêmico
+O módulo experimental de refinamento da bola com U-Net está no código, mas não integra o pipeline final avaliado no trabalho.
 
-- **Autor:** Eduardo Larson.
-- **Instituição:** Universidade Estadual do Centro-Oeste (UNICENTRO).
-- **Ano:** 2026.
-- **Avaliação do TCC:** nota 10,0.
+## Resultados reportados no TCC
 
-## Conteúdo disponível
+Os números abaixo são os resultados históricos descritos no trabalho e na defesa; não foram recalculados nesta publicação. A avaliação de xG usa eventos estruturados do StatsBomb e é distinta da avaliação do pipeline completo em vídeo.
 
-Este repositório apresenta o projeto. O código-fonte, os pesos dos modelos, os dados e uma demonstração executável ainda não estão publicados aqui.
+### Modelo de xG
 
-A nota acadêmica não representa uma métrica de desempenho do modelo. Para avaliar tecnicamente os resultados, será necessário disponibilizar o protocolo de avaliação, a descrição dos dados e as métricas de cada etapa.
+Base de **60.148 finalizações**, abrangendo **26 combinações de competição e temporada**, com separação por partida via `GroupShuffleSplit`. O trabalho informa aproximadamente 12.030 finalizações no conjunto reservado.
 
-## Contato
+| Modelo | AUC-ROC | Brier Score | xG médio |
+| --- | ---: | ---: | ---: |
+| XGBoost | 0,7903 | 0,0848 | 0,1124 |
+| XGNet | 0,8096 | 0,0800 | 0,1111 |
 
-[Eduardo Larson](https://github.com/edularson) · [E-mail](mailto:eduardolarson05@gmail.com)
+**Ressalva de avaliação:** a implementação de XGNet ajusta o Platt Scaling nos logits e rótulos do mesmo conjunto em que calcula as métricas finais. Portanto, esse conjunto participa do ajuste do calibrador e não representa um teste totalmente independente. A próxima avaliação deve separar treino, calibração e teste por partida. AUC não deve ser interpretada como percentual de acerto de todas as previsões.
+
+### Detecção de bola
+
+| Modelo | Precisão | Recall | mAP50 |
+| --- | ---: | ---: | ---: |
+| YOLOv8x geral | 0,940 | 0,404 | 0,507 |
+| YOLOv8x especializado | 0,696 | 0,655 | 0,631 |
+
+O recall passou de **40,4% para 65,5%**, um ganho de **25,1 pontos percentuais**, acompanhado de redução da precisão. O mAP50 passou de 0,507 para 0,631, um ganho de 0,124.
+
+### Finalizações em vídeo
+
+Estudo piloto com cinco conjuntos de 14 clipes cada: **70 clipes**, com **56 clipes positivos e 14 controles**. BEL-ITA foi usado no desenvolvimento; os outros conjuntos avaliam novos contextos.
+
+| Conjunto | Papel | Precisão | Recall | F1 |
+| --- | --- | ---: | ---: | ---: |
+| BEL-ITA | Desenvolvimento | 0,857 | 0,545 | 0,667 |
+| BEL-RUS | Generalização | 1,000 | 0,364 | 0,533 |
+| ARG-FRA | Generalização | 1,000 | 0,364 | 0,533 |
+| FLA-CAP | Generalização | 0,667 | 0,182 | 0,286 |
+| SAN-MIR | Generalização | 1,000 | 0,167 | 0,286 |
+
+O tamanho reduzido da amostra limita as conclusões sobre generalização. O principal gargalo identificado é a detecção da bola, especialmente em transmissões diferentes do domínio de treinamento.
+
+![Mapa de finalizações gerado pelo projeto](docs/images/mapa-finalizacoes.png)
+
+## Código e documentos
+
+```text
+src/
+  main.py                 Pipeline e roteiro de avaliação usado na pesquisa
+  configs/config.yaml     Caminhos dos modelos e parâmetros
+  modules/                Detecção, rastreamento, homografia, times e xG
+  tools/train_xg.py        Treinamento do modelo de xG
+scripts/
+  process_video.py         Entrada parametrizada para processar um clipe
+docs/
+  reproducibilidade.md    Dependências externas, pesos e limitações
+  resultados.md           Protocolo e leitura dos resultados
+  images/                 Exemplos extraídos dos materiais fornecidos
+```
+
+- [Texto completo do TCC em PDF](docs/TCC_Eduardo_Larson_Final_2026.pdf)
+- [Apresentação da defesa em PowerPoint](docs/TCC-EduardoLarson.pptx)
+- [Resultados e ressalvas metodológicas](docs/resultados.md)
+- [Preparação e execução](docs/reproducibilidade.md)
+
+## Execução
+
+O código depende de pesos treinados e componentes externos que não estão incluídos. Prepare os arquivos descritos no [guia de reprodução](docs/reproducibilidade.md) antes de executar.
+
+```bash
+git clone https://github.com/edularson/TCC-EduardoLarson.git
+cd TCC-EduardoLarson
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+No Windows, ative o ambiente com `.venv\Scripts\activate`. Com os componentes externos, os pesos e o modelo de xG preparados:
+
+```bash
+python scripts/process_video.py --video caminho/partida.mp4 --output outputs/partida.mp4
+```
+
+Esse comando não executa treinamento de xG nem calcula métricas de avaliação de finalizações. O classificador de uniformes é ajustado ao clipe fornecido a cada execução.
+
+## Limitações e próximos passos
+
+- Separar calibração e teste do XGNet e recalcular as métricas.
+- Ampliar a avaliação em vídeo e os dados de futebol brasileiro.
+- Disponibilizar os pesos próprios e registrar as versões dos componentes externos.
+- Validar a instalação completa em ambiente limpo.
+- Melhorar o rastreamento sob oclusões e a consistência de identidade dos jogadores.
+- Revisar o roteiro histórico em `src/main.py` antes de reutilizá-lo para avaliação: contém caminhos e anotações de um experimento específico.
+
+## Créditos
+
+Implementação e pesquisa: Eduardo Larson. Orientação: Prof. Dr. Daniel Rigoni. Dependências e dados: Ultralytics, Roboflow Sports, PnLCalib, SoccerNet e StatsBomb Open Data, com seus respectivos autores, licenças e condições de uso. Os componentes externos, pesos e vídeos não são redistribuídos neste repositório.
+
+[Perfil do autor](https://github.com/edularson) · [Contato](mailto:eduardolarson05@gmail.com)
