@@ -4,9 +4,25 @@ Análise tática de futebol a partir de vídeos de transmissão, com detecção 
 
 Projeto do Trabalho de Conclusão de Curso de **Eduardo Larson**, orientado pelo **Prof. Dr. Daniel Rigoni**, no Bacharelado em Ciência da Computação da **UNICENTRO**, em 2026.
 
-![Exemplo de detecção e rastreamento apresentado na defesa](docs/images/frame-processado.jpeg)
+## Demonstração em vídeo
 
-Exemplo extraído da apresentação do TCC. As imagens de transmissão pertencem aos respectivos titulares.
+[![Prévia animada do pipeline processando ARG–FRA](docs/images/demo-arg-fra.gif)](docs/videos/demo-arg-fra.mp4)
+
+[Abrir o vídeo completo em MP4](docs/videos/demo-arg-fra.mp4) · aproximadamente 7 segundos, em Full HD.
+
+A prévia animada mostra o processamento do clipe ARG–FRA. O MP4 preserva a resolução original e foi convertido para H.264 para facilitar a reprodução no navegador.
+
+## Exemplos de resultado
+
+![Resultado do pipeline com detecção de finalização, xG e minimapa tático](docs/images/resultado-pipeline-xg.png)
+
+Resultado do pipeline em ARG–FRA, com destaque para a finalização e o xG estimado de 0,253.
+
+![Comparação visual entre o xG do pipeline e o de uma calculadora externa](docs/images/comparacao-xg.png)
+
+Exemplo qualitativo: xG de 0,253 no pipeline e 0,258 na calculadora apresentada na defesa. Essa comparação de uma jogada não substitui a avaliação quantitativa do modelo.
+
+As imagens de transmissão e da ferramenta externa pertencem aos respectivos titulares.
 
 ## O que o projeto implementa
 
@@ -112,6 +128,6 @@ Esse comando não executa treinamento de xG nem calcula métricas de avaliação
 
 ## Créditos
 
-Implementação e pesquisa: Eduardo Larson. Orientação: Prof. Dr. Daniel Rigoni. Dependências e dados: Ultralytics, Roboflow Sports, PnLCalib, SoccerNet e StatsBomb Open Data, com seus respectivos autores, licenças e condições de uso. Os componentes externos, pesos e vídeos não são redistribuídos neste repositório.
+Implementação e pesquisa: Eduardo Larson. Orientação: Prof. Dr. Daniel Rigoni. Dependências e dados: Ultralytics, Roboflow Sports, PnLCalib, SoccerNet e StatsBomb Open Data, com seus respectivos autores, licenças e condições de uso. Os componentes externos, pesos e conjuntos de vídeos de avaliação não estão incluídos. O clipe processado de demonstração foi fornecido pelo autor; as imagens da transmissão pertencem aos respectivos titulares.
 
 [Perfil do autor](https://github.com/edularson) · [Contato](mailto:eduardolarson05@gmail.com)

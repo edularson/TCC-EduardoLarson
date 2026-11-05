@@ -27,3 +27,6 @@ debug_homography_out/
 *.avi
 *.webm
 *.zip
+
+# Único clipe selecionado para demonstração no README
+!docs/videos/demo-arg-fra.mp4

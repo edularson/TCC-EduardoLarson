@@ -2,7 +2,7 @@
 
 ## Estado desta publicação
 
-O repositório contém o código fornecido pelo autor, a configuração, o texto final, os slides e exemplos visuais. Os vídeos, datasets, ambientes virtuais, pesos treinados e bibliotecas externas não foram copiados. A instalação e a inferência completas ainda precisam ser validadas em um ambiente limpo.
+O repositório contém o código fornecido pelo autor, a configuração, o texto final, os slides, exemplos visuais e um clipe processado de demonstração em `docs/videos/demo-arg-fra.mp4`, com prévia animada no README. Os conjuntos de vídeos de avaliação, datasets, ambientes virtuais, pesos treinados e bibliotecas externas não foram copiados. A instalação e a inferência completas ainda precisam ser validadas em um ambiente limpo.
 
 O `requirements.txt` da raiz preserva o ambiente exportado pelo autor. O arquivo `requirements-research.txt` preserva uma segunda lista encontrada no projeto; as duas listas divergem em algumas versões e não devem ser instaladas em sequência. A referência de Python indicada nos materiais locais é 3.12.
 
