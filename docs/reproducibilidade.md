@@ -55,6 +55,7 @@ O script cria o diretório de saída e configura o log antes de inicializar o pi
 
 - Foi acrescentado um comando parametrizado em `scripts/process_video.py`, sem os rótulos de avaliação do roteiro histórico.
 - Foi corrigida a importação de `get_project_root` em `team_classifier.py`, que já usava essa função.
+- Foram removidos espaços ao final de linhas para padronizar a formatação.
 - Os algoritmos e o treinamento fornecidos foram preservados; não houve retreinamento ou recálculo de métricas.
 
 ## Verificação realizada

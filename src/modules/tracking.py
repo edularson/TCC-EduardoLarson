@@ -200,18 +200,18 @@ class BallKalmanTracker:
         Returns:
             Array (5,) melhor detecção filtrada, ou None se não há estimativa.
         """
-        
+
         # ── 1. FILTRO FÍSICO DE ÁREA E PROPORÇÃO (Hard Negative Rejection) ──
         valid_detections = []
         for det in ball_detections:
             w = det[2] - det[0]
             h = det[3] - det[1]
             area = w * h
-            
+
             # Evita divisão por zero
-            if h == 0 or w == 0: 
+            if h == 0 or w == 0:
                 continue
-                
+
             aspect_ratio = max(w/h, h/w)
             print(f"DEBUG BOLA: area={area:.1f}, aspect_ratio={aspect_ratio:.2f}, conf={det[4]:.2f}")
 
@@ -219,11 +219,11 @@ class BallKalmanTracker:
             if area > 350 or aspect_ratio > 2.0:
                 # Rejeita o falso positivo silenciosamente
                 continue
-                
+
             valid_detections.append(det)
-            
+
         ball_detections = np.array(valid_detections) if len(valid_detections) > 0 else np.empty((0, 5))
-        
+
         # ── sem detecções ────────────────────────────────────────────────────
         if len(ball_detections) == 0:
             self._missing += 1
@@ -296,7 +296,7 @@ class BallKalmanTracker:
                 return self._last_valid_bbox
 
             best = accepted
-            
+
         if self._is_static(best):
             self._missing += 1
             if self._missing > self.max_missing:
@@ -319,7 +319,7 @@ class BallKalmanTracker:
         self._missing         = 0
         self._last_valid_bbox = None
         self._static_history = []
-        
+
     def _is_static(self, bbox: np.ndarray, threshold_px: float = 5.0, min_frames: int = 8) -> bool:
         """
         Retorna True se a bola ficou parada por min_frames consecutivos.

@@ -1,5 +1,5 @@
 # TCC Requirements
-# Python 3.12 
+# Python 3.12
 
 # Computer Vision
 opencv-python==4.13.0.92

@@ -220,10 +220,10 @@ class PitchMapper:
     def _nbjw_to_pipeline(self, H_f2p: np.ndarray) -> np.ndarray:
         """
         Converte H do sistema PnLCalib (centrado, z=0) para sistema pipeline.
-        
+
         H_f2p: pixel → metros centrados (origem no centro do campo)
         Pipeline: origem no canto esquerdo (0,0)
-        
+
         metro_pipeline = metro_centrado + [52.5, 34.0]
         H_pipeline = T @ H_f2p
         """
